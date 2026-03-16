@@ -1,71 +1,49 @@
 import os
-from crewai import Agent, Task, Crew, Process, LLM
-from crewai.tools import tool
 import yfinance as yf
+from crewai import Agent, Task, Crew, LLM
 
-# 1. STOP OPENAI PINGS
 os.environ["OPENAI_API_KEY"] = "NA"
 
-# 2. DEFINE MICRO MODEL (TinyLlama uses ~800MB RAM)
+# CONFIGURAZIONE LLM - Usiamo Phi-3 (che hai già!)
 local_llm = LLM(
-    model="ollama/tinyllama",
-    base_url="http://127.0.0.1:11434"
+    model="ollama/phi3:latest", 
+    base_url="http://127.0.0.1:11434", # Se usi --network="host"
+    temperature=0.1
 )
 
-# 3. TOOL DEFINITION
-@tool("stock_price_tool")
-def get_stock_data(ticker: str) -> str:
-    """Fetch price and 30-day trend for a ticker (e.g., 'AAPL', 'RACE.MI')."""
-    try:
-        stock = yf.Ticker(ticker.strip().upper())
-        hist = stock.history(period="30d")
-        if hist.empty: return f"No data for {ticker}"
-        price_now = hist['Close'].iloc[-1]
-        price_30d = hist['Close'].iloc[0]
-        trend = "UP ⬆️" if price_now > price_30d else "DOWN ⬇️"
-        return f"{ticker}: {price_now:.2f} ({trend})"
-    except Exception as e:
-        return f"Error: {str(e)}"
+def get_market_data():
+    tickers = ["AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "RACE.MI", "ISP.MI", "ENI.MI", "7203.T", "9984.T"]
+    results = []
+    print("⏳ Estrazione dati reali...")
+    for t in tickers:
+        try:
+            stock = yf.Ticker(t)
+            h = stock.history(period="35d")
+            if len(h) < 30: continue
+            p_now = h['Close'].iloc[-1]
+            p_old = h['Close'].iloc[-30]
+            diff = ((p_now - p_old) / p_old) * 100
+            trend = "UP ⬆️" if diff > 0 else "DOWN ⬇️"
+            forecast = "BULLISH 🟢" if diff > 1.5 else "BEARISH 🔴" if diff < -1.5 else "STABLE 🟡"
+            results.append(f"| {t} | {p_now:.2f} | {trend} ({diff:.1f}%) | {forecast} |")
+        except: continue
+    return "\n".join(results)
 
-# 4. AGENTS
-researcher = Agent(
-    role='Financial Researcher',
-    goal='Get stock data for NVDA and RACE.MI.',
-    backstory='Data expert. You use the stock_price_tool.',
-    tools=[get_stock_data],
+table_rows = get_market_data()
+
+reporter = Agent(
+    role='Financial Reporter',
+    goal='Format the stock data into a clean Markdown table.',
+    backstory='You are an expert in financial formatting.',
     llm=local_llm,
-    verbose=True,
-    allow_delegation=False
+    verbose=True
 )
 
-writer = Agent(
-    role='Reporting Specialist',
-    goal='Create a Markdown table with the data.',
-    backstory='Table expert.',
-    llm=local_llm,
-    verbose=True,
-    allow_delegation=False
+task = Task(
+    description=f"Create a Markdown table with these rows:\n{table_rows}\nHeaders: | Ticker | Price | Trend (30d) | Forecast |",
+    expected_output="A clean markdown table.",
+    agent=reporter
 )
 
-# 5. THE CREW
-financial_crew = Crew(
-    agents=[researcher, writer],
-    tasks=[
-        Task(description="Use tool for NVDA and RACE.MI prices.", 
-             expected_output="Ticker and price list.", agent=researcher),
-        Task(description="Format into a Markdown table.", 
-             expected_output="A table.", agent=writer)
-    ],
-    process=Process.sequential,
-    manager_llm=local_llm,
-    embedder={
-        "provider": "ollama",
-        "config": {"model": "tinyllama"}
-    }
-)
-
-print("\n🚀 [SYSTEM] Starting local analysis with TinyLlama (Micro RAM Mode)...")
-print("🚀 [SYSTEM] Using only ~800MB of RAM.\n")
-
-result = financial_crew.kickoff()
-print(result)
+crew = Crew(agents=[reporter], tasks=[task])
+print(crew.kickoff())
